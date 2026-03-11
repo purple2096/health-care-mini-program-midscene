@@ -1,0 +1,25 @@
+android:
+  deviceId: "172.25.54.221"
+  # launch: com.tencent.mm
+
+tasks:
+  - name: "进入FSG健康管理首页"
+    flow:
+      - ai: 点击“预约体检”
+
+  - name: "开始绑定流程"
+    flow:
+      - ai: 点击“立即绑定”
+
+  - name: "本人绑定成功"
+    flow:
+      - ai: 点击“绑定”
+      - aiAssert: 显示绑定成功提示
+      - ai: 点击“返回票券列表”
+
+  - name: "开始解绑流程"
+    flow:
+      - ai: 点击“上海外服全国标准卡A套”右侧三个小点icon
+      - ai: 点击“解除绑定”
+      - ai: 点击“确认解绑”
+      - aiAssert: 页面标题显示“预约体检”
