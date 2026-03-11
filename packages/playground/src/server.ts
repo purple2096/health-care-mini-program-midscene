@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,11 +51,20 @@ class PlaygroundServer {
 
   private _initialized = false;
 
+  // Native MJPEG stream probe: null = not tested, true/false = result
+  private _nativeMjpegAvailable: boolean | null = null;
+
   // Factory function for recreating agent
   private agentFactory?: (() => PageAgent | Promise<PageAgent>) | null;
 
   // Track current running task
   private currentTaskId: string | null = null;
+
+  // Flag to pause MJPEG polling during agent recreation or task execution
+  private _agentReady = true;
+
+  // Flag to track if AI config has changed and agent needs recreation
+  private _configDirty = false;
 
   constructor(
     agent: PageAgent | (() => PageAgent) | (() => Promise<PageAgent>),
@@ -173,12 +183,7 @@ class PlaygroundServer {
    * Recreate agent instance (for cancellation)
    */
   private async recreateAgent(): Promise<void> {
-    if (!this.agentFactory) {
-      throw new Error(
-        'Cannot recreate agent: factory function not provided. Attempting to destroy existing agent only.',
-      );
-    }
-
+    this._agentReady = false;
     console.log('Recreating agent to cancel current task...');
 
     // Destroy old agent instance
@@ -190,13 +195,22 @@ class PlaygroundServer {
       console.warn('Failed to destroy old agent:', error);
     }
 
-    // Create new agent instance
-    try {
-      this.agent = await this.agentFactory();
-      console.log('Agent recreated successfully');
-    } catch (error) {
-      console.error('Failed to recreate agent:', error);
-      throw error;
+    // Create new agent instance if factory is available
+    if (this.agentFactory) {
+      try {
+        this.agent = await this.agentFactory();
+        this._agentReady = true;
+        console.log('Agent recreated successfully');
+      } catch (error) {
+        this._agentReady = true;
+        console.error('Failed to recreate agent:', error);
+        throw error;
+      }
+    } else {
+      this._agentReady = true;
+      console.warn(
+        'Agent destroyed but cannot recreate: no factory function provided. Next /execute call will fail.',
+      );
     }
   }
 
@@ -337,6 +351,7 @@ class PlaygroundServer {
         prompt,
         params,
         requestId,
+        deepLocate,
         deepThink,
         screenshotIncluded,
         domIncluded,
@@ -349,9 +364,11 @@ class PlaygroundServer {
         });
       }
 
-      // Always recreate agent before execution to ensure latest config is applied
-      if (this.agentFactory) {
-        console.log('Destroying old agent before execution...');
+      // Recreate agent only when AI config has changed (via /config API)
+      if (this.agentFactory && this._configDirty) {
+        this._configDirty = false;
+        this._agentReady = false;
+        console.log('AI config changed, recreating agent...');
         try {
           if (this.agent && typeof this.agent.destroy === 'function') {
             await this.agent.destroy();
@@ -360,12 +377,13 @@ class PlaygroundServer {
           console.warn('Failed to destroy old agent:', error);
         }
 
-        console.log('Creating new agent with latest config...');
         try {
           this.agent = await this.agentFactory();
-          console.log('Agent created successfully');
+          this._agentReady = true;
+          console.log('Agent recreated with new config');
         } catch (error) {
-          console.error('Failed to create agent:', error);
+          this._agentReady = true;
+          console.error('Failed to recreate agent:', error);
           return res.status(500).json({
             error: `Failed to create agent: ${error instanceof Error ? error.message : 'Unknown error'}`,
           });
@@ -373,13 +391,12 @@ class PlaygroundServer {
       }
 
       // Update device options if provided
-      if (
-        deviceOptions &&
-        this.agent.interface &&
-        'options' in this.agent.interface
-      ) {
-        this.agent.interface.options = {
-          ...(this.agent.interface.options || {}),
+      if (deviceOptions && this.agent.interface) {
+        const iface = this.agent.interface as unknown as {
+          options?: Record<string, unknown>;
+        };
+        iface.options = {
+          ...(iface.options || {}),
           ...deviceOptions,
         };
       }
@@ -423,6 +440,8 @@ class PlaygroundServer {
         requestId,
       };
 
+      // Pause MJPEG polling during execution to avoid ADB contention
+      this._agentReady = false;
       const startTime = Date.now();
       try {
         // Get action space to check for dynamic actions
@@ -441,6 +460,7 @@ class PlaygroundServer {
           actionSpace,
           value,
           {
+            deepLocate,
             deepThink,
             screenshotIncluded,
             domIncluded,
@@ -474,6 +494,9 @@ class PlaygroundServer {
         console.error(
           `write out dump failed: requestId: ${requestId}, ${errorMessage}`,
         );
+      } finally {
+        // Resume MJPEG polling after execution
+        this._agentReady = true;
       }
 
       res.send(response);
@@ -543,8 +566,12 @@ class PlaygroundServer {
             console.warn('Failed to get execution data before cancel:', error);
           }
 
-          // Recreate/destroy agent to cancel the current task
-          await this.recreateAgent();
+          // Destroy and recreate agent to cancel the current task
+          try {
+            await this.recreateAgent();
+          } catch (error) {
+            console.warn('Failed to recreate agent during cancel:', error);
+          }
 
           // Clean up
           delete this.taskExecutionDumps[requestId];
@@ -593,6 +620,30 @@ class PlaygroundServer {
       }
     });
 
+    // MJPEG streaming endpoint for real-time screen preview
+    // Proxies native MJPEG stream (e.g. WDA MJPEG server) when available,
+    // falls back to polling screenshotBase64() otherwise.
+    this._app.get('/mjpeg', async (req: Request, res: Response) => {
+      const nativeUrl = this.agent?.interface?.mjpegStreamUrl;
+
+      if (nativeUrl && this._nativeMjpegAvailable !== false) {
+        const proxyOk = await this.probeAndProxyNativeMjpeg(
+          nativeUrl,
+          req,
+          res,
+        );
+        if (proxyOk) return;
+      }
+
+      if (typeof this.agent?.interface?.screenshotBase64 !== 'function') {
+        return res.status(500).json({
+          error: 'Screenshot method not available on current interface',
+        });
+      }
+
+      await this.startPollingMjpegStream(req, res);
+    });
+
     // Interface info API for getting interface type and description
     this._app.get('/interface-info', async (_req: Request, res: Response) => {
       try {
@@ -631,6 +682,7 @@ class PlaygroundServer {
 
       try {
         overrideAIConfig(aiConfig);
+        this._configDirty = true;
       } catch (error: unknown) {
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
@@ -659,6 +711,118 @@ class PlaygroundServer {
           'AI config updated. Agent will be recreated on next execution.',
       });
     });
+  }
+
+  /**
+   * Probe and proxy a native MJPEG stream (e.g. WDA MJPEG server).
+   * Result is cached so we only probe once per server lifetime.
+   */
+  private probeAndProxyNativeMjpeg(
+    nativeUrl: string,
+    req: Request,
+    res: Response,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      console.log(`MJPEG: trying native stream from ${nativeUrl}`);
+      const proxyReq = http.get(nativeUrl, (proxyRes) => {
+        this._nativeMjpegAvailable = true;
+        console.log('MJPEG: streaming via native WDA MJPEG server');
+        const contentType = proxyRes.headers['content-type'];
+        if (contentType) {
+          res.setHeader('Content-Type', contentType);
+        }
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Connection', 'keep-alive');
+        proxyRes.pipe(res);
+        req.on('close', () => proxyReq.destroy());
+        resolve(true);
+      });
+      proxyReq.on('error', (err) => {
+        this._nativeMjpegAvailable = false;
+        console.warn(
+          `MJPEG: native stream unavailable (${err.message}), using polling mode`,
+        );
+        resolve(false);
+      });
+    });
+  }
+
+  /**
+   * Stream screenshots as MJPEG by polling screenshotBase64().
+   */
+  private async startPollingMjpegStream(
+    req: Request,
+    res: Response,
+  ): Promise<void> {
+    const defaultMjpegFps = 10;
+    const maxMjpegFps = 30;
+    const maxErrorBackoffMs = 3000;
+    const errorLogThreshold = 3;
+
+    const parsedFps = Number(req.query.fps);
+    const fps = Math.min(
+      Math.max(Number.isNaN(parsedFps) ? defaultMjpegFps : parsedFps, 1),
+      maxMjpegFps,
+    );
+    const interval = Math.round(1000 / fps);
+    const boundary = 'mjpeg-boundary';
+    console.log(`MJPEG: streaming via polling mode (${fps}fps)`);
+
+    res.setHeader(
+      'Content-Type',
+      `multipart/x-mixed-replace; boundary=${boundary}`,
+    );
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Connection', 'keep-alive');
+
+    let stopped = false;
+    let consecutiveErrors = 0;
+    req.on('close', () => {
+      stopped = true;
+    });
+
+    while (!stopped) {
+      // Skip frame while agent is being recreated
+      if (!this._agentReady) {
+        await new Promise((r) => setTimeout(r, 200));
+        continue;
+      }
+
+      const frameStart = Date.now();
+      try {
+        const base64 = await this.agent.interface.screenshotBase64();
+        if (stopped) break;
+        consecutiveErrors = 0;
+
+        const raw = base64.replace(/^data:image\/\w+;base64,/, '');
+        const buf = Buffer.from(raw, 'base64');
+
+        res.write(`--${boundary}\r\n`);
+        res.write('Content-Type: image/jpeg\r\n');
+        res.write(`Content-Length: ${buf.length}\r\n\r\n`);
+        res.write(buf);
+        res.write('\r\n');
+      } catch (err) {
+        if (stopped) break;
+        consecutiveErrors++;
+        if (consecutiveErrors <= errorLogThreshold) {
+          console.error('MJPEG frame error:', err);
+        } else if (consecutiveErrors === errorLogThreshold + 1) {
+          console.error(
+            'MJPEG: suppressing further errors, retrying silently...',
+          );
+        }
+        const backoff = Math.min(1000 * consecutiveErrors, maxErrorBackoffMs);
+        await new Promise((r) => setTimeout(r, backoff));
+        continue;
+      }
+
+      const elapsed = Date.now() - frameStart;
+      const remaining = interval - elapsed;
+      if (remaining > 0) {
+        await new Promise((r) => setTimeout(r, remaining));
+      }
+    }
   }
 
   /**

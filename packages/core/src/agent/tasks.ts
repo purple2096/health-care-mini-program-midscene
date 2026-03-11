@@ -39,6 +39,7 @@ import { ExecutionSession } from './execution-session';
 import { TaskBuilder } from './task-builder';
 import type { TaskCache } from './task-cache';
 export { locatePlanForLocate } from './task-builder';
+import { setTimingFieldOnce } from '@/task-timing';
 import { descriptionOfTree } from '@midscene/shared/extractor';
 import { taskTitleStr } from './ui-utils';
 import { parsePrompt } from './utils';
@@ -160,7 +161,8 @@ export class TaskExecutor {
     modelConfigForDefaultIntent: IModelConfig,
     options?: {
       cacheable?: boolean;
-      subTask?: boolean;
+      deepLocate?: boolean;
+      abortSignal?: AbortSignal;
     },
   ) {
     return this.taskBuilder.build(
@@ -244,6 +246,8 @@ export class TaskExecutor {
     imagesIncludeCount?: number,
     deepThink?: DeepThinkOption,
     fileChooserAccept?: string[],
+    deepLocate?: boolean,
+    abortSignal?: AbortSignal,
   ): Promise<
     ExecutionResult<
       | {
@@ -264,6 +268,8 @@ export class TaskExecutor {
         replanningCycleLimitOverride,
         imagesIncludeCount,
         deepThink,
+        deepLocate,
+        abortSignal,
       );
     });
   }
@@ -278,6 +284,8 @@ export class TaskExecutor {
     replanningCycleLimitOverride?: number,
     imagesIncludeCount?: number,
     deepThink?: DeepThinkOption,
+    deepLocate?: boolean,
+    abortSignal?: AbortSignal,
   ): Promise<
     ExecutionResult<
       | {
@@ -308,6 +316,13 @@ export class TaskExecutor {
 
     // Main planning loop - unified plan/replan logic
     while (true) {
+      // Check abort signal before each planning cycle
+      if (abortSignal?.aborted) {
+        return session.appendErrorPlan(
+          `Task aborted: ${abortSignal.reason || 'abort signal received'}`,
+        );
+      }
+
       // Get sub-goal status text if available
       const subGoalStatus =
         this.conversationHistory.subGoalsToText() || undefined;
@@ -332,6 +347,7 @@ export class TaskExecutor {
             const { uiContext } = executorContext;
             assert(uiContext, 'uiContext is required for Planning task');
             const { modelFamily } = modelConfigForPlanning;
+            const timing = executorContext.task.timing;
 
             const actionSpace = this.getActionSpace();
             debug(
@@ -353,6 +369,7 @@ export class TaskExecutor {
 
             let planResult: Awaited<ReturnType<typeof planImpl>>;
             try {
+              setTimingFieldOnce(timing, 'callAiStart');
               planResult = await planImpl(param.userInstruction, {
                 context: uiContext,
                 actionContext: param.aiActContext,
@@ -363,6 +380,7 @@ export class TaskExecutor {
                 includeBbox: includeBboxInPlanning,
                 imagesIncludeCount,
                 deepThink,
+                abortSignal,
               });
             } catch (planError) {
               if (planError instanceof AIResponseParseError) {
@@ -374,6 +392,8 @@ export class TaskExecutor {
                 };
               }
               throw planError;
+            } finally {
+              setTimingFieldOnce(timing, 'callAiEnd');
             }
             debug('planResult', JSON.stringify(planResult, null, 2));
 
@@ -448,7 +468,8 @@ export class TaskExecutor {
           modelConfigForDefaultIntent,
           {
             cacheable,
-            subTask: true,
+            deepLocate,
+            abortSignal,
           },
         );
       } catch (error) {
@@ -486,6 +507,13 @@ export class TaskExecutor {
 
       if (errorCountInOnePlanningLoop > maxErrorCountAllowedInOnePlanningLoop) {
         return session.appendErrorPlan('Too many errors in one planning loop');
+      }
+
+      // Check abort signal after executing actions
+      if (abortSignal?.aborted) {
+        return session.appendErrorPlan(
+          `Task aborted: ${abortSignal.reason || 'abort signal received'}`,
+        );
       }
 
       // // Check if task is complete

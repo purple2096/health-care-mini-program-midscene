@@ -12,7 +12,6 @@ import type {
 } from '@midscene/core';
 import { filterBase64Value } from '@midscene/visualizer';
 import { Blackboard, Player } from '@midscene/visualizer';
-import type { WebUIContext } from '@midscene/web';
 import { Segmented } from 'antd';
 import { useEffect, useState } from 'react';
 import { fullTimeStrWithMilliseconds } from '../../../../../packages/visualizer/src/utils';
@@ -28,7 +27,7 @@ const ScreenshotDisplay = (props: {
       <div className="screenshot-item-title">{props.title}</div>
       {props.img && (
         <div>
-          <img src={props.img} alt="screenshot" />
+          <img src={props.img} alt="screenshot" loading="lazy" />
         </div>
       )}
       {props.children && <div>{props.children}</div>}
@@ -70,6 +69,13 @@ const extractElementsFromParam = (param: any): any[] => {
   return elements;
 };
 
+const capturedAtText = (capturedAt?: number): string => {
+  if (typeof capturedAt === 'number') {
+    return `captured at ${fullTimeStrWithMilliseconds(capturedAt)}`;
+  }
+  return 'captured at unknown';
+};
+
 const DetailPanel = (): JSX.Element => {
   const insightDump = useExecutionDump((store) => store.insightDump);
   const _contextLoadId = useExecutionDump((store) => store._contextLoadId);
@@ -86,9 +92,7 @@ const DetailPanel = (): JSX.Element => {
   const imageHeight = useExecutionDump((store) => store.insightHeight);
 
   // Check if page context is frozen
-  const isPageContextFrozen = Boolean(
-    (activeTask?.uiContext as WebUIContext)?._isFrozen,
-  );
+  const isPageContextFrozen = Boolean(activeTask?.uiContext?._isFrozen);
 
   const availableViewTypes = [VIEW_TYPE_SCREENSHOT, VIEW_TYPE_JSON];
 
@@ -126,6 +130,7 @@ const DetailPanel = (): JSX.Element => {
   } else if (viewType === VIEW_TYPE_SCREENSHOT) {
     const screenshotItems: {
       timestamp?: number;
+      screenshotTimestamp?: number;
       screenshot: string;
       timing?: string;
     }[] = [];
@@ -158,25 +163,29 @@ const DetailPanel = (): JSX.Element => {
       highlightElements = [...highlightElements, ...locateElements];
     }
 
-    contextLocatorView =
-      highlightElements.length > 0 && activeTask.uiContext?.size ? (
-        <ScreenshotDisplay
-          title={isPageContextFrozen ? 'UI Context (Frozen)' : 'UI Context'}
-        >
-          <Blackboard
-            key={`${_contextLoadId}`}
-            uiContext={activeTask.uiContext as WebUIContext}
-            highlightElements={highlightElements}
-            highlightRect={insightDump?.taskInfo?.searchArea}
-          />
-        </ScreenshotDisplay>
-      ) : null;
+    const contextScreenshotAt = capturedAtText(
+      activeTask.uiContext?.screenshot?.capturedAt,
+    );
+
+    contextLocatorView = activeTask.uiContext?.shotSize ? (
+      <ScreenshotDisplay
+        title={`${isPageContextFrozen ? 'UI Context (Frozen)' : 'UI Context'} / ${contextScreenshotAt}`}
+      >
+        <Blackboard
+          key={`${_contextLoadId}`}
+          uiContext={activeTask.uiContext}
+          highlightElements={highlightElements}
+          highlightRect={insightDump?.taskInfo?.searchArea}
+        />
+      </ScreenshotDisplay>
+    ) : null;
 
     // screenshot view
     const screenshotFromContext = activeTask.uiContext?.screenshot;
     if (screenshotFromContext?.base64) {
       screenshotItems.push({
         timestamp: activeTask.timing?.start ?? undefined,
+        screenshotTimestamp: screenshotFromContext.capturedAt,
         screenshot: screenshotFromContext.base64,
         timing: 'before-calling',
       });
@@ -187,6 +196,7 @@ const DetailPanel = (): JSX.Element => {
         if (item.screenshot?.base64) {
           screenshotItems.push({
             timestamp: item.ts,
+            screenshotTimestamp: item.screenshot.capturedAt,
             screenshot: item.screenshot.base64,
             timing: item.timing,
           });
@@ -199,13 +209,13 @@ const DetailPanel = (): JSX.Element => {
         <div className="screenshot-item-wrapper scrollable">
           {contextLocatorView && <div>{contextLocatorView}</div>}
           {screenshotItems.map((item) => {
-            const time = item.timing
-              ? `${fullTimeStrWithMilliseconds(item.timestamp)} / ${item.timing}`
-              : fullTimeStrWithMilliseconds(item.timestamp);
+            const timeText = item.timing || 'unknown-timing';
+            const screenshotAt = capturedAtText(item.screenshotTimestamp);
+            const title = `${timeText} / ${screenshotAt}`;
             return (
               <ScreenshotDisplay
                 key={item.timestamp}
-                title={time}
+                title={title}
                 img={item.screenshot}
               />
             );

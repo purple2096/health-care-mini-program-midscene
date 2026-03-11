@@ -1,4 +1,5 @@
 import { defineConfig } from '@rslib/core';
+import { version } from './package.json';
 
 export default defineConfig({
   lib: [
@@ -30,7 +31,11 @@ export default defineConfig({
   source: {
     entry: {
       index: './src/index.ts',
+      cli: './src/cli.ts',
       'mcp-server': './src/mcp-server.ts',
+    },
+    define: {
+      __VERSION__: JSON.stringify(version),
     },
   },
 });

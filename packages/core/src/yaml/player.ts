@@ -447,20 +447,49 @@ export class ScriptPlayer<T extends MidsceneYamlScriptEnv> {
         const locatePrompt: TUserPrompt | undefined = locate ?? aiScroll;
 
         await agent.aiScroll(locatePrompt, scrollOptions);
+      } else if ('aiTap' in flowItem) {
+        const { aiTap, prompt, locate, ...tapOptions } = flowItem as any;
+
+        let locatePrompt: TUserPrompt;
+        let opts = tapOptions;
+        // Support both formats:
+        // 1. { aiTap: null, locate: { prompt, images, ... } }  (locate as sibling key)
+        // 2. { aiTap: { locate: { prompt, images, ... } } }    (locate nested in aiTap)
+        const locateObj =
+          locate ??
+          (typeof aiTap === 'object' && aiTap !== null
+            ? aiTap.locate
+            : undefined);
+
+        if (typeof aiTap === 'string' && aiTap) {
+          // User YAML: aiTap: 'search input box'
+          locatePrompt = aiTap;
+        } else if (typeof locateObj === 'object' && locateObj?.prompt) {
+          // buildYamlFlowFromPlans: { aiTap: '', locate: { prompt, deepLocate, cacheable } }
+          const { prompt: lp, ...locateOpts } = locateObj;
+          locatePrompt = lp;
+          opts = { ...locateOpts, ...tapOptions };
+        } else {
+          // User YAML: aiTap: { prompt: '...' } or aiTap: null + prompt: '...'
+          locatePrompt = aiTap?.prompt || prompt || locateObj;
+        }
+
+        assert(locatePrompt, 'missing prompt for aiTap');
+        await agent.aiTap(locatePrompt, opts);
       } else {
         // generic action, find the action in actionSpace
 
-        /* for aiTap, aiRightClick, the parameters are a flattened data for the 'locate', these are all valid data
+        /* for aiRightClick, the parameters are a flattened data for the 'locate', these are all valid data
 
-        - aiTap: 'search input box'
-        - aiTap: 'search input box'
-          deepThink: true
+        - aiRightClick: 'search input box'
+        - aiRightClick: 'search input box'
+          deepLocate: true
           cacheable: false
-        - aiTap:
+        - aiRightClick:
           prompt: 'search input box'
-        - aiTap:
+        - aiRightClick:
           prompt: 'search input box'
-          deepThink: true
+          deepLocate: true
           cacheable: false
         */
 

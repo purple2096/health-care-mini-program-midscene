@@ -6,6 +6,7 @@ import {
   type DeviceAction,
   defineAction,
   defineActionClearInput,
+  defineActionCursorMove,
   defineActionDoubleClick,
   defineActionDragAndDrop,
   defineActionHover,
@@ -24,6 +25,14 @@ import { getDebug } from '@midscene/shared/logger';
 import { transformHotkeyInput } from '@midscene/shared/us-keyboard-layout';
 
 const debug = getDebug('web:page');
+
+const navigateParamSchema = z.object({
+  url: z
+    .string()
+    .describe(
+      'The URL to navigate to. Must start with https://, file://, or a similar protocol.',
+    ),
+});
 
 function normalizeKeyInputs(value: string | string[]): string[] {
   const inputs = Array.isArray(value) ? value : [value];
@@ -490,6 +499,14 @@ export const commonWebActionsForWebPage = <T extends AbstractWebPage>(
     const keys = getKeyCommands(param.keyName);
     await page.keyboard.press(keys as any); // TODO: fix this type error
   }),
+  defineActionCursorMove(async (param) => {
+    const arrowKey = param.direction === 'left' ? 'ArrowLeft' : 'ArrowRight';
+    const times = param.times ?? 1;
+    for (let i = 0; i < times; i++) {
+      await page.keyboard.press([{ key: arrowKey as any }]);
+      await sleep(100);
+    }
+  }),
   defineActionScroll(async (param) => {
     const element = param.locate;
     const startingPoint = element
@@ -631,17 +648,14 @@ export const commonWebActionsForWebPage = <T extends AbstractWebPage>(
     await page.clearInput(param.locate as ElementInfo | undefined);
   }),
 
-  defineAction({
+  defineAction<typeof navigateParamSchema, { url: string }>({
     name: 'Navigate',
     description:
       'Navigate the browser to a specified URL. Opens the URL in the current tab.',
-    paramSchema: z.object({
-      url: z
-        .string()
-        .describe(
-          'The URL to navigate to. Must start with https://, file://, or a similar protocol.',
-        ),
-    }),
+    paramSchema: navigateParamSchema,
+    sample: {
+      url: 'https://www.example.com',
+    },
     call: async (param) => {
       if (!page.navigate) {
         throw new Error(

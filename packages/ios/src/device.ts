@@ -15,11 +15,14 @@ import {
   type IOSDeviceOpt,
   defineAction,
   defineActionClearInput,
+  defineActionCursorMove,
   defineActionDoubleClick,
   defineActionDragAndDrop,
   defineActionKeyboardPress,
   defineActionScroll,
+  defineActionSwipe,
   defineActionTap,
+  normalizeMobileSwipeParam,
 } from '@midscene/core/device';
 import { sleep } from '@midscene/core/utils';
 import { DEFAULT_WDA_PORT } from '@midscene/shared/constants';
@@ -35,11 +38,47 @@ export type { IOSDeviceOpt, IOSDeviceInputOpt } from '@midscene/core/device';
 
 const debugDevice = getDebug('ios:device');
 
+// Input action schema for iOS
+const iosInputParamSchema = z.object({
+  value: z
+    .string()
+    .describe(
+      'The text to input. Provide the final content for replace/append modes, or an empty string when using clear mode to remove existing text.',
+    ),
+  autoDismissKeyboard: z
+    .boolean()
+    .optional()
+    .describe(
+      'Whether to dismiss the keyboard after input. Defaults to true if not specified. Set to false to keep the keyboard visible after input.',
+    ),
+  mode: z.preprocess(
+    (val) => (val === 'append' ? 'typeOnly' : val),
+    z
+      .enum(['replace', 'clear', 'typeOnly'])
+      .default('replace')
+      .optional()
+      .describe(
+        'Input mode: "replace" (default) - clear the field and input the value; "typeOnly" - type the value directly without clearing the field first; "clear" - clear the field without inputting new text.',
+      ),
+  ),
+  locate: getMidsceneLocationSchema()
+    .describe('The input field to be filled')
+    .optional(),
+});
+type IOSInputParam = {
+  value: string;
+  autoDismissKeyboard?: boolean;
+  mode?: 'replace' | 'clear' | 'typeOnly';
+  locate?: LocateResultElement;
+};
+
 /**
  * HTTP methods supported by WebDriverAgent API
  */
 export const WDA_HTTP_METHODS = ['GET', 'POST', 'DELETE', 'PUT'] as const;
 export type WDAHttpMethod = (typeof WDA_HTTP_METHODS)[number];
+
+const DEFAULT_WDA_MJPEG_PORT = 9100;
 
 export class IOSDevice implements AbstractInterface {
   private deviceId: string;
@@ -50,6 +89,8 @@ export class IOSDevice implements AbstractInterface {
   private customActions?: DeviceAction<any>[];
   private wdaBackend: WebDriverAgentBackend;
   private wdaManager: WDAManager;
+  /** URL of WDA's native MJPEG server for real-time streaming */
+  mjpegStreamUrl: string;
   private appNameMapping: Record<string, string> = {};
   interfaceType: InterfaceType = 'ios';
   uri: string | undefined;
@@ -67,36 +108,15 @@ export class IOSDevice implements AbstractInterface {
         assert(element, 'Element not found, cannot double click');
         await this.doubleTap(element.center[0], element.center[1]);
       }),
-      defineAction({
+      defineAction<typeof iosInputParamSchema, IOSInputParam>({
         name: 'Input',
         description: 'Input text into the input field',
         interfaceAlias: 'aiInput',
-        paramSchema: z.object({
-          value: z
-            .string()
-            .describe(
-              'The text to input. Provide the final content for replace/append modes, or an empty string when using clear mode to remove existing text.',
-            ),
-          autoDismissKeyboard: z
-            .boolean()
-            .optional()
-            .describe(
-              'Whether to dismiss the keyboard after input. Defaults to true if not specified. Set to false to keep the keyboard visible after input.',
-            ),
-          mode: z.preprocess(
-            (val) => (val === 'append' ? 'typeOnly' : val),
-            z
-              .enum(['replace', 'clear', 'typeOnly'])
-              .default('replace')
-              .optional()
-              .describe(
-                'Input mode: "replace" (default) - clear the field and input the value; "typeOnly" - type the value directly without clearing the field first; "clear" - clear the field without inputting new text.',
-              ),
-          ),
-          locate: getMidsceneLocationSchema()
-            .describe('The input field to be filled')
-            .optional(),
-        }),
+        paramSchema: iosInputParamSchema,
+        sample: {
+          value: 'test@example.com',
+          locate: { prompt: 'the email input field' },
+        },
         call: async (param) => {
           const element = param.locate;
           if (param.mode !== 'typeOnly') {
@@ -167,10 +187,33 @@ export class IOSDevice implements AbstractInterface {
           from.center[1],
           to.center[0],
           to.center[1],
+          1000,
         );
+      }),
+      defineActionSwipe(async (param) => {
+        const { startPoint, endPoint, duration, repeatCount } =
+          normalizeMobileSwipeParam(param, await this.size());
+        for (let i = 0; i < repeatCount; i++) {
+          await this.swipe(
+            startPoint.x,
+            startPoint.y,
+            endPoint.x,
+            endPoint.y,
+            duration,
+          );
+        }
       }),
       defineActionKeyboardPress(async (param) => {
         await this.pressKey(param.keyName);
+      }),
+      defineActionCursorMove(async (param) => {
+        const arrowKey =
+          param.direction === 'left' ? 'ArrowLeft' : 'ArrowRight';
+        const times = param.times ?? 1;
+        for (let i = 0; i < times; i++) {
+          await this.pressKey(arrowKey);
+          await sleep(100);
+        }
       }),
       defineAction<
         z.ZodObject<{
@@ -193,6 +236,9 @@ export class IOSDevice implements AbstractInterface {
             'The element to be long pressed',
           ),
         }),
+        sample: {
+          locate: { prompt: 'the message bubble' },
+        },
         call: async (param) => {
           const element = param.locate;
           assert(element, 'LongPress requires an element to be located');
@@ -219,11 +265,13 @@ export class IOSDevice implements AbstractInterface {
 
     const wdaPort = options?.wdaPort || DEFAULT_WDA_PORT;
     const wdaHost = options?.wdaHost || 'localhost';
+    const mjpegPort = options?.wdaMjpegPort ?? DEFAULT_WDA_MJPEG_PORT;
     this.wdaBackend = new WebDriverAgentBackend({
       port: wdaPort,
       host: wdaHost,
     });
     this.wdaManager = WDAManager.getInstance(wdaPort, wdaHost);
+    this.mjpegStreamUrl = `http://${wdaHost}:${mjpegPort}`;
   }
 
   describe(): string {
@@ -327,6 +375,22 @@ ScreenSize: ${size.width}x${size.height} (DPR: ${size.scale})
     return this;
   }
 
+  /**
+   * Terminate (close) an iOS app by bundle ID.
+   * Supports app name resolution via setAppNameMapping when provided.
+   */
+  public async terminate(bundleId: string): Promise<void> {
+    const resolved = this.resolveBundleId(bundleId) ?? bundleId;
+    try {
+      debugDevice(`Terminating app: ${resolved}`);
+      await this.wdaBackend.terminateApp(resolved);
+      debugDevice(`Successfully terminated: ${resolved}`);
+    } catch (error: any) {
+      debugDevice(`Error terminating ${resolved}: ${error}`);
+      throw new Error(`Failed to terminate ${resolved}: ${error.message}`);
+    }
+  }
+
   async getElementsInfo(): Promise<ElementInfo[]> {
     return [];
   }
@@ -380,7 +444,6 @@ ScreenSize: ${size.width}x${size.height} (DPR: ${size.scale})
     return {
       width: screenSize.width,
       height: screenSize.height,
-      dpr: screenSize.scale,
     };
   }
 
@@ -974,6 +1037,16 @@ export type DeviceActionRunWdaRequest = DeviceAction<
 >;
 export type DeviceActionLaunch = DeviceAction<LaunchParam, void>;
 
+const terminateParamSchema = z
+  .string()
+  .describe(
+    'Bundle ID of the app to terminate (close). Use the exact bundle ID, e.g. com.apple.Preferences.',
+  );
+
+type TerminateParam = z.infer<typeof terminateParamSchema>;
+
+export type DeviceActionTerminate = DeviceAction<TerminateParam, void>;
+
 /**
  * Platform-specific action definitions for iOS
  * Single source of truth for both runtime behavior and type definitions
@@ -989,6 +1062,10 @@ const createPlatformActions = (device: IOSDevice) => {
       description: 'Execute WebDriverAgent API request directly on iOS device',
       interfaceAlias: 'runWdaRequest',
       paramSchema: runWdaRequestParamSchema,
+      sample: {
+        method: 'GET',
+        endpoint: '/status',
+      },
       call: async (param) => {
         return await device.runWdaRequest(
           param.method,
@@ -1004,6 +1081,15 @@ const createPlatformActions = (device: IOSDevice) => {
       paramSchema: launchParamSchema,
       call: async (param) => {
         await device.launch(param);
+      },
+    }),
+    Terminate: defineAction<typeof terminateParamSchema, TerminateParam, void>({
+      name: 'Terminate',
+      description: 'Terminate (close) an iOS app by its bundle ID',
+      interfaceAlias: 'terminate',
+      paramSchema: terminateParamSchema,
+      call: async (param) => {
+        await device.terminate(param);
       },
     }),
     IOSHomeButton: defineAction({
@@ -1024,4 +1110,5 @@ const createPlatformActions = (device: IOSDevice) => {
 };
 
 export type DeviceActionIOSHomeButton = DeviceAction<undefined, void>;
+
 export type DeviceActionIOSAppSwitcher = DeviceAction<undefined, void>;

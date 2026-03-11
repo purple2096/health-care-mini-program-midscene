@@ -53,15 +53,15 @@ export abstract class AbstractInterface {
   // @deprecated do NOT extend this method
   abstract evaluateJavaScript?<T = any>(script: string): Promise<T>;
 
-  // @deprecated do NOT extend this method
-  abstract getContext?(): Promise<UIContext>;
-
   /**
    * Get the current time from the device.
    * Returns the device's current timestamp in milliseconds.
    * This is useful when the system time and device time are not synchronized.
    */
   getTimestamp?(): Promise<number>;
+
+  /** URL of native MJPEG stream for real-time screen preview (e.g. WDA MJPEG server) */
+  mjpegStreamUrl?: string;
 }
 
 // Generic function to define actions with proper type inference
@@ -104,6 +104,9 @@ export const defineActionTap = (
     description: 'Tap the element',
     interfaceAlias: 'aiTap',
     paramSchema: actionTapParamSchema,
+    sample: {
+      locate: { prompt: 'the "Submit" button' },
+    },
     call,
   });
 };
@@ -129,6 +132,9 @@ export const defineActionRightClick = (
     description: 'Right click the element',
     interfaceAlias: 'aiRightClick',
     paramSchema: actionRightClickParamSchema,
+    sample: {
+      locate: { prompt: 'the file icon on the desktop' },
+    },
     call,
   });
 };
@@ -154,6 +160,9 @@ export const defineActionDoubleClick = (
     description: 'Double click the element',
     interfaceAlias: 'aiDoubleClick',
     paramSchema: actionDoubleClickParamSchema,
+    sample: {
+      locate: { prompt: 'the folder icon' },
+    },
     call,
   });
 };
@@ -174,6 +183,9 @@ export const defineActionHover = (
     description: 'Move the mouse to the element',
     interfaceAlias: 'aiHover',
     paramSchema: actionHoverParamSchema,
+    sample: {
+      locate: { prompt: 'the navigation menu item "Products"' },
+    },
     call,
   });
 };
@@ -191,15 +203,12 @@ export const actionInputParamSchema = z.object({
   locate: getMidsceneLocationSchema()
     .describe(inputLocateDescription)
     .optional(),
-  mode: z.preprocess(
-    (val) => (val === 'append' ? 'typeOnly' : val),
-    z
-      .enum(['replace', 'clear', 'typeOnly'])
-      .default('replace')
-      .describe(
-        'Input mode: "replace" (default) - clear the field and input the value; "typeOnly" - type the value directly without clearing the field first; "clear" - clear the field without inputting new text.',
-      ),
-  ),
+  mode: z
+    .enum(['replace', 'clear', 'typeOnly'])
+    .default('replace')
+    .describe(
+      'Input mode: "replace" (default) - clear the field and input the value; "typeOnly" - type the value directly without clearing the field first; "clear" - clear the field without inputting new text.',
+    ),
 });
 export type ActionInputParam = {
   value: string;
@@ -215,7 +224,17 @@ export const defineActionInput = (
     description: 'Input the value into the element',
     interfaceAlias: 'aiInput',
     paramSchema: actionInputParamSchema,
-    call,
+    sample: {
+      value: 'test@example.com',
+      locate: { prompt: 'the email input field' },
+    },
+    call: (param) => {
+      // backward compat: convert deprecated 'append' to 'typeOnly'
+      if ((param.mode as string) === 'append') {
+        param.mode = 'typeOnly';
+      }
+      return call(param);
+    },
   });
 };
 
@@ -247,6 +266,9 @@ export const defineActionKeyboardPress = (
       'Press a key or key combination, like "Enter", "Tab", "Escape", or "Control+A", "Shift+Enter". Do not use this to type text.',
     interfaceAlias: 'aiKeyboardPress',
     paramSchema: actionKeyboardPressParamSchema,
+    sample: {
+      keyName: 'Enter',
+    },
     call,
   });
 };
@@ -289,9 +311,14 @@ export const defineActionScroll = (
   return defineAction<typeof actionScrollParamSchema, ActionScrollParam>({
     name: 'Scroll',
     description:
-      'Scroll the page or an element. The direction to scroll, the scroll type, and the distance to scroll. The distance is the number of pixels to scroll. If not specified, use `down` direction, `once` scroll type, and `null` distance.',
+      'Scroll the page or a scrollable element to browse content. This is the preferred way to scroll on all platforms, including mobile. Supports scrollToBottom/scrollToTop for boundary navigation. Default: direction `down`, scrollType `singleAction`, distance `null`.',
     interfaceAlias: 'aiScroll',
     paramSchema: actionScrollParamSchema,
+    sample: {
+      direction: 'down',
+      scrollType: 'singleAction',
+      locate: { prompt: 'the center of the product list area' },
+    },
     call,
   });
 };
@@ -315,9 +342,13 @@ export const defineActionDragAndDrop = (
   >({
     name: 'DragAndDrop',
     description:
-      'Drag and drop (hold the mouse or finger down and move the mouse) ',
+      'Pick up a specific UI element and move it to a new position (e.g., reorder a card, move a file into a folder, sort list items). The element itself moves with your finger/mouse.',
     interfaceAlias: 'aiDragAndDrop',
     paramSchema: actionDragAndDropParamSchema,
+    sample: {
+      from: { prompt: 'the "report.pdf" file icon' },
+      to: { prompt: 'the upload drop zone' },
+    },
     call,
   });
 };
@@ -344,6 +375,9 @@ export const defineActionLongPress = (
     name: 'LongPress',
     description: 'Long press the element',
     paramSchema: ActionLongPressParamSchema,
+    sample: {
+      locate: { prompt: 'the message bubble' },
+    },
     call,
   });
 };
@@ -390,14 +424,78 @@ export type ActionSwipeParam = {
   repeat?: number;
 };
 
+export function normalizeMobileSwipeParam(
+  param: ActionSwipeParam,
+  screenSize: { width: number; height: number },
+): {
+  startPoint: { x: number; y: number };
+  endPoint: { x: number; y: number };
+  duration: number;
+  repeatCount: number;
+} {
+  const { width, height } = screenSize;
+  const { start, end } = param;
+
+  const startPoint = start
+    ? { x: start.center[0], y: start.center[1] }
+    : { x: width / 2, y: height / 2 };
+
+  let endPoint: { x: number; y: number };
+
+  if (end) {
+    endPoint = { x: end.center[0], y: end.center[1] };
+  } else if (param.distance) {
+    const direction = param.direction;
+    if (!direction) {
+      throw new Error('direction is required for swipe gesture');
+    }
+    endPoint = {
+      x:
+        startPoint.x +
+        (direction === 'right'
+          ? param.distance
+          : direction === 'left'
+            ? -param.distance
+            : 0),
+      y:
+        startPoint.y +
+        (direction === 'down'
+          ? param.distance
+          : direction === 'up'
+            ? -param.distance
+            : 0),
+    };
+  } else {
+    throw new Error(
+      'Either end or distance must be specified for swipe gesture',
+    );
+  }
+
+  endPoint.x = Math.max(0, Math.min(endPoint.x, width));
+  endPoint.y = Math.max(0, Math.min(endPoint.y, height));
+
+  const duration = param.duration ?? 300;
+
+  let repeatCount = typeof param.repeat === 'number' ? param.repeat : 1;
+  if (repeatCount === 0) {
+    repeatCount = 10;
+  }
+
+  return { startPoint, endPoint, duration, repeatCount };
+}
+
 export const defineActionSwipe = (
   call: (param: ActionSwipeParam) => Promise<void>,
 ): DeviceAction<ActionSwipeParam> => {
   return defineAction<typeof ActionSwipeParamSchema, ActionSwipeParam>({
     name: 'Swipe',
     description:
-      'Perform a swipe gesture. You must specify either "end" (target location) or "distance" + "direction" - they are mutually exclusive. Use "end" for precise location-based swipes, or "distance" + "direction" for relative movement.',
+      'Perform a touch gesture for interactions beyond regular scrolling (e.g., flip pages in a carousel, dismiss a notification, swipe-to-delete a list item). For regular content scrolling, use Scroll instead. Use "distance" + "direction" for relative movement, or "end" for precise endpoint.',
     paramSchema: ActionSwipeParamSchema,
+    sample: {
+      start: { prompt: 'center of the notification' },
+      end: { prompt: 'upper edge of the screen' },
+    },
     call,
   });
 };
@@ -423,6 +521,47 @@ export const defineActionClearInput = (
     description: inputLocateDescription,
     interfaceAlias: 'aiClearInput',
     paramSchema: actionClearInputParamSchema,
+    sample: {
+      locate: { prompt: 'the search input field' },
+    },
+    call,
+  });
+};
+
+// CursorMove
+export const actionCursorMoveParamSchema = z.object({
+  direction: z
+    .enum(['left', 'right'])
+    .describe('The direction to move the cursor'),
+  times: z
+    .number()
+    .int()
+    .min(1)
+    .default(1)
+    .describe(
+      'The number of times to move the cursor in the specified direction',
+    ),
+});
+export type ActionCursorMoveParam = {
+  direction: 'left' | 'right';
+  times?: number;
+};
+
+export const defineActionCursorMove = (
+  call: (param: ActionCursorMoveParam) => Promise<void>,
+): DeviceAction<ActionCursorMoveParam> => {
+  return defineAction<
+    typeof actionCursorMoveParamSchema,
+    ActionCursorMoveParam
+  >({
+    name: 'CursorMove',
+    description:
+      'Move the text cursor (caret) left or right within an input field or text area. Use this to reposition the cursor without selecting text.',
+    paramSchema: actionCursorMoveParamSchema,
+    sample: {
+      direction: 'left',
+      times: 3,
+    },
     call,
   });
 };
@@ -445,6 +584,9 @@ export const defineActionSleep = (): DeviceAction<ActionSleepParam> => {
     description:
       'Wait for a specified duration before continuing. Defaults to 1 second (1000ms) if not specified.',
     paramSchema: ActionSleepParamSchema,
+    sample: {
+      timeMs: 2000,
+    },
     call: async (param) => {
       const duration = param?.timeMs ?? 1000;
       getDebug('device:common-action')(`Sleeping for ${duration}ms`);
@@ -459,4 +601,6 @@ export type {
   AndroidDeviceInputOpt,
   IOSDeviceOpt,
   IOSDeviceInputOpt,
+  HarmonyDeviceOpt,
+  HarmonyDeviceInputOpt,
 } from './device-options';

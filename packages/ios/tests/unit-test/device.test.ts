@@ -187,7 +187,6 @@ describe('IOSDevice', () => {
       expect(size).toEqual({
         width: 375,
         height: 812,
-        dpr: 2,
       });
       expect(mockWdaClient.getWindowSize).toHaveBeenCalled();
     });
@@ -207,6 +206,27 @@ describe('IOSDevice', () => {
       await device.launch('com.apple.Preferences');
       expect(mockWdaClient.launchApp).toHaveBeenCalledWith(
         'com.apple.Preferences',
+      );
+    });
+
+    it('should terminate app by bundle ID', async () => {
+      await device.connect();
+
+      await device.terminate('com.apple.Preferences');
+      expect(mockWdaClient.terminateApp).toHaveBeenCalledWith(
+        'com.apple.Preferences',
+      );
+      expect(mockWdaClient.terminateApp).toHaveBeenCalledTimes(1);
+    });
+
+    it('should handle app terminate failure', async () => {
+      mockWdaClient.terminateApp = vi
+        .fn()
+        .mockRejectedValue(new Error('App terminate failed'));
+      await device.connect();
+
+      await expect(device.terminate('com.invalid.app')).rejects.toThrow(
+        'App terminate failed',
       );
     });
 
@@ -305,7 +325,6 @@ describe('IOSDevice', () => {
       expect(size).toEqual({
         width: 375,
         height: 812,
-        dpr: 2,
       });
     });
 
@@ -486,11 +505,6 @@ describe('IOSDevice', () => {
   describe('Screen Operations', () => {
     beforeEach(async () => {
       await device.connect();
-    });
-
-    it('should calculate DPR correctly', async () => {
-      const size = await device.size();
-      expect(size.dpr).toBe(2); // DPR from mocked getScreenScale
     });
 
     it('should handle different screen sizes', async () => {

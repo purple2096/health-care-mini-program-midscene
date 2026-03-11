@@ -123,6 +123,7 @@ export async function AiLocateElement(options: {
   targetElementDescription: TUserPrompt;
   searchConfig?: Awaited<ReturnType<typeof AiLocateSection>>;
   modelConfig: IModelConfig;
+  abortSignal?: AbortSignal;
 }): Promise<{
   parseResult: {
     elements: LocateResultElement[];
@@ -150,8 +151,8 @@ export async function AiLocateElement(options: {
     : systemPromptToLocateElement(modelFamily);
 
   let imagePayload = screenshotBase64;
-  let imageWidth = context.size.width;
-  let imageHeight = context.size.height;
+  let imageWidth = context.shotSize.width;
+  let imageHeight = context.shotSize.height;
   let originalImageWidth = imageWidth;
   let originalImageHeight = imageHeight;
 
@@ -209,7 +210,9 @@ export async function AiLocateElement(options: {
 
   if (isAutoGLM(modelFamily)) {
     const { content: rawResponseContent, usage } =
-      await callAIWithStringResponse(msgs, modelConfig);
+      await callAIWithStringResponse(msgs, modelConfig, {
+        abortSignal: options.abortSignal,
+      });
 
     debugInspect('auto-glm rawResponse:', rawResponseContent);
 
@@ -279,6 +282,7 @@ export async function AiLocateElement(options: {
     res = await callAIWithObjectResponse<AIElementResponse | [number, number]>(
       msgs,
       modelConfig,
+      { abortSignal: options.abortSignal },
     );
   } catch (callError) {
     // Return error with usage and rawResponse if available
@@ -366,6 +370,7 @@ export async function AiLocateSection(options: {
   context: UIContext;
   sectionDescription: TUserPrompt;
   modelConfig: IModelConfig;
+  abortSignal?: AbortSignal;
 }): Promise<{
   rect?: Rect;
   imageBase64?: string;
@@ -417,6 +422,7 @@ export async function AiLocateSection(options: {
     result = await callAIWithObjectResponse<AISectionLocatorResponse>(
       msgs,
       modelConfig,
+      { abortSignal: options.abortSignal },
     );
   } catch (callError) {
     // Return error with usage and rawResponse if available
@@ -442,12 +448,12 @@ export async function AiLocateSection(options: {
   if (sectionBbox) {
     const targetRect = adaptBboxToRect(
       sectionBbox,
-      context.size.width,
-      context.size.height,
+      context.shotSize.width,
+      context.shotSize.height,
       0,
       0,
-      context.size.width,
-      context.size.height,
+      context.shotSize.width,
+      context.shotSize.height,
       modelFamily,
     );
     debugSection('original targetRect %j', targetRect);
@@ -460,12 +466,12 @@ export async function AiLocateSection(options: {
       .map((bbox) => {
         return adaptBboxToRect(
           bbox,
-          context.size.width,
-          context.size.height,
+          context.shotSize.width,
+          context.shotSize.height,
           0,
           0,
-          context.size.width,
-          context.size.height,
+          context.shotSize.width,
+          context.shotSize.height,
           modelFamily,
         );
       });
@@ -475,7 +481,7 @@ export async function AiLocateSection(options: {
     const mergedRect = mergeRects([targetRect, ...referenceRects]);
     debugSection('mergedRect %j', mergedRect);
 
-    sectionRect = expandSearchArea(mergedRect, context.size);
+    sectionRect = expandSearchArea(mergedRect, context.shotSize);
     debugSection('expanded sectionRect %j', sectionRect);
   }
 
